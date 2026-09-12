@@ -1,16 +1,62 @@
+[build-system]
+requires = [
+    "setuptools>=69",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+
 [project]
 name = "nicotin"
-version = "0.1.0"
-description = "An async Rubika library with a Pyrogram-style API surface."
+version = "0.1.1"
+description = "An async Rubika library with a Pyrogram-style API."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+keywords = [
+    "rubika",
+    "rubika-bot",
+    "rubika-api",
+    "bot",
+    "async",
+    "telegram-style",
+    "pyrogram-style",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
 dependencies = [
     "httpx>=0.24",
 ]
 
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+# authors و project.urls عمداً خالی گذاشته شده — بعداً که اسم/گیت‌هاب
+# نهایی مشخص شد، این دو بخش رو اضافه کن:
+#
+# authors = [
+#     { name = "..." },
+# ]
+#
+# [project.urls]
+# Homepage = "https://github.com/mr-api-rgb/nicotin"
+# Repository = "https://github.com/mr-api-rgb/nicotin"
+# Issues = "https://github.com/mr-api-rgb/nicotin/blob/main/LICENSE"
 
 [tool.setuptools.packages.find]
-include = ["nicotin*"]
+where = ["."]
+include = [
+    "nicotin",
+    "nicotin.*",
+]
