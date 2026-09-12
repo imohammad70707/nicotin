@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: nicotin
+Version: 0.1.0
+Summary: An async Rubika library with a Pyrogram-style API surface.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.24
+
+# NICOTIN
+
+یک کتابخانه‌ی async برای روبیکا (Rubika) که **عمداً** از نظر نام متدها، پراپرتی‌ها، فیلترها، ساختار Handler و حتی سبک مستندات، شبیه کتابخانه‌های معروف تلگرام (به‌خصوص Pyrogram) طراحی شده — تا هر کسی که با بات‌نویسی تلگرام آشناست، بدون یادگیری از صفر بتواند برای روبیکا هم بات بنویسد.
+
+```bash
+pip install -e .
+```
+
+## شروع سریع
+
+```python
+from nicotin import Client, filters
+
+app = Client("my_account", auth="AUTH_KEY_INJA")
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply("سلام از نیکوتین 👋")
+
+@app.on_message(filters.text & filters.private)
+async def echo(client, message):
+    await message.reply(message.text)
+
+app.run()
+```
+
+## ساختار پروژه (مثل Pyrogram)
+
+```
+nicotin/
+├── client.py        # کلاس Client — متدهای send_message, send_photo, edit_message_text, ...
+├── types/            # Message, User, Chat, File, CallbackQuery, Update
+├── filters.py        # filters.text, filters.command(), filters.regex(), ترکیب با & | ~
+├── handlers/          # MessageHandler, CallbackQueryHandler, ...
+├── enums/             # ChatType, MessageType, ChatActivity, ParseMode
+├── errors/            # NicotinError, RPCError, FloodWait, AuthError, ...
+└── network/            # Session — لایه‌ی ارتباط HTTP با API روبیکا
+```
+
+## نگاشت متدها (Telegram ↔ Rubika)
+
+| در NICOTIN | مشابه در Pyrogram | چه کاری می‌کند در روبیکا |
+|---|---|---|
+| `Client.send_message()` | `Client.send_message()` | ارسال پیام متنی |
+| `Client.send_photo()` / `send_video()` / `send_document()` | همنام | ارسال رسانه |
+| `Client.edit_message_text()` | همنام | ویرایش پیام |
+| `Client.delete_messages()` | همنام | حذف پیام (Local/Global) |
+| `Client.get_chat_history()` | همنام | گرفتن تاریخچه‌ی پیام‌ها |
+| `Client.ban_chat_member()` | همنام | حذف/بن عضو گروه |
+| `message.reply()` | همنام | ریپلای به همان پیام |
+| `filters.text/photo/command()` | همنام | فیلتر روی نوع/محتوای پیام |
+| `@app.on_message()` | همنام | ثبت هندلر پیام |
+
+## نکته‌ی مهم درباره‌ی لایه‌ی شبکه
+
+`nicotin/network/session.py` اسکلت درخواست‌های HTTPS به API روبیکا را می‌سازد، اما رمزنگاری واقعی AES بدنه‌ی درخواست/پاسخ (که روبیکا برای `data_enc` نیاز دارد) به‌صورت عمدی به‌عنوان دو متد قابل جایگزینی (`Session.encrypt` / `Session.decrypt`) گذاشته شده — چون آن بخش وابسته به کلید احراز هویت واقعی هر اکانت است. برای استفاده‌ی واقعی، این دو متد را با `pycryptodome` کامل کنید (کلید AES از هش auth شما مشتق می‌شود).
+
+## مجوز
+
+MIT
