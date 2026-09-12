@@ -55,14 +55,16 @@ class User(Object):
 
     @classmethod
     def _parse(cls, client, data: dict) -> "User":
+        # Covers both a regular user object and the Bot API's "getMe"
+        # bot object (bot_id / bot_title instead of user_guid / first_name).
         return cls(
             client=client,
-            id=data.get("user_guid") or data.get("id"),
-            first_name=data.get("first_name", ""),
+            id=data.get("user_guid") or data.get("bot_id") or data.get("id", ""),
+            first_name=data.get("first_name") or data.get("bot_title", ""),
             last_name=data.get("last_name"),
             username=data.get("username"),
             phone=data.get("phone"),
             is_verified=data.get("is_verified", False),
-            is_bot=data.get("is_bot", False),
+            is_bot=data.get("is_bot", "bot_id" in data),
             is_deleted=data.get("is_deleted", False),
         )
