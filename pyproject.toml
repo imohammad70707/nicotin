@@ -1,0 +1,16 @@
+[project]
+name = "nicotin"
+version = "0.1.0"
+description = "An async Rubika library with a Pyrogram-style API surface."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.24",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nicotin*"]
