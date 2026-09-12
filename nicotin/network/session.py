@@ -2,96 +2,65 @@
 nicotin.network.session
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Low-level transport: builds the JSON envelope Rubika's REST API
-expects, sends it over HTTPS with ``httpx``, and unwraps the response
-— comparable to Pyrogram's MTProto ``Session`` class, but far simpler
-since Rubika speaks plain HTTPS/JSON rather than a binary protocol.
-
-Rubika's real production clients additionally AES-encrypt the
-``data_enc`` field of every request/response using a key derived from
-login; that layer is intentionally kept out of this skeleton so it can
-be swapped in (e.g. via ``pycryptodome``) without touching anything
-above this module — see :meth:`Session.encrypt` / :meth:`Session.decrypt`.
+Low-level transport for Rubika's official **Bot API** (the same kind
+of platform-provided, token-authenticated REST API Telegram bots use
+— not the reverse-engineered user/session API). The bot token lives
+in the URL path, every request/response body is plain JSON with no
+extra encryption layer, so this module is intentionally much thinner
+than a user-session client would need to be.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import time
-import uuid
 from typing import Any
 
 import httpx
 
-from ..errors import RPCError, ConnectionError_, FloodWait
+from ..errors import RPCError, ConnectionError_, FloodWait, RequestTimeout
 
-DEFAULT_API_URL = "https://messengerg2c1.iranlms.ir/"
+DEFAULT_BASE_URL = "https://botapi.rubika.ir/v3"
 DEFAULT_TIMEOUT = 15
 
 
 class Session:
     """
-    One HTTPS session against a Rubika API endpoint.
+    One HTTPS session against Rubika's Bot API for a single bot token.
 
-    :param auth: the account's auth key, obtained once via login/OTP.
-    :param platform: reported client platform, e.g. ``"web"`` or ``"android"``.
-    :param api_url: base API URL; override for a different DC.
+    :param bot_token: the token you got from **Rubika Bot** (``@rubika_bot``)
+        when you created your bot — the only credential a bot needs.
+    :param base_url: override the API base URL if Rubika ever changes it.
     """
 
     def __init__(
         self,
-        auth: str,
+        bot_token: str,
         *,
-        platform: str = "web",
-        api_url: str = DEFAULT_API_URL,
+        base_url: str = DEFAULT_BASE_URL,
         timeout: int = DEFAULT_TIMEOUT,
     ):
-        self.auth = auth
-        self.platform = platform
-        self.api_url = api_url
+        self.bot_token = bot_token
+        self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._http = httpx.AsyncClient(timeout=timeout)
 
     async def close(self):
         await self._http.aclose()
 
-    # ------------------------------------------------------------------
-    # Encryption hooks — plug real AES-256-CBC (keyed off `auth`) in here.
-    # Left as no-ops so the rest of the library is fully testable/offline.
-    # ------------------------------------------------------------------
+    def _url_for(self, method: str) -> str:
+        return f"{self.base_url}/{self.bot_token}/{method}"
 
-    def encrypt(self, data: dict) -> str:
-        return json.dumps(data)
-
-    def decrypt(self, data_enc: str) -> dict:
-        return json.loads(data_enc)
-
-    async def invoke(self, method: str, data: dict[str, Any]) -> dict:
+    async def invoke(self, method: str, data: dict[str, Any] | None = None) -> dict:
         """
-        Call one Rubika API ``method`` with ``data``, returning the
-        already-unwrapped ``data`` object from a successful response.
+        Call one Bot API ``method`` with a plain-JSON ``data`` body,
+        returning the ``data`` object from a successful response.
 
         Raises :class:`~nicotin.errors.RPCError` / :class:`~nicotin.errors.FloodWait`
         on failure, matching how Pyrogram surfaces RPC errors from ``invoke()``.
         """
-        payload = {
-            "api_version": "6",
-            "auth": self.auth,
-            "client": {
-                "app_name": "Main",
-                "app_version": "4.4.1",
-                "platform": self.platform,
-                "package": "app.rbmain.a",
-                "lang_code": "fa",
-            },
-            "data_enc": self.encrypt({"method": method, "input": data, "client": {}}),
-            "method": method,
-            "tmp_session": uuid.uuid4().hex,
-        }
-
         try:
-            response = await self._http.post(self.api_url, json=payload)
+            response = await self._http.post(self._url_for(method), json=data or {})
+        except httpx.TimeoutException as e:
+            raise RequestTimeout(f"'{method}' timed out after {self.timeout}s") from e
         except httpx.HTTPError as e:
             raise ConnectionError_(str(e)) from e
 
@@ -100,12 +69,26 @@ class Session:
         except ValueError as e:
             raise RPCError("INVALID_RESPONSE", "Server returned non-JSON body") from e
 
-        status = body.get("status", "ERROR")
+        status = body.get("status", "ERROR" if response.status_code >= 400 else "OK")
 
         if status == "OK":
-            return self.decrypt(body.get("data_enc", "{}"))
+            return body.get("data", {})
 
-        if status == "FLOOD_WAIT":
-            raise FloodWait(int(body.get("status_det", 5)))
+        if status in ("FLOOD_WAIT", "TOO_MANY_REQUESTS"):
+            raise FloodWait(int(body.get("retry_after", 5)))
 
-        raise RPCError(status, body.get("status_det"))
+        raise RPCError(status, body.get("message") or body.get("status_det"))
+
+    async def upload_file(self, upload_url: str, file_path: str) -> dict:
+        """POST a local file's bytes to an upload URL returned by ``requestSendFile``."""
+        with open(file_path, "rb") as f:
+            try:
+                response = await self._http.post(upload_url, files={"file": f})
+            except httpx.TimeoutException as e:
+                raise RequestTimeout(f"file upload timed out after {self.timeout}s") from e
+            except httpx.HTTPError as e:
+                raise ConnectionError_(str(e)) from e
+        try:
+            return response.json()
+        except ValueError as e:
+            raise RPCError("INVALID_RESPONSE", "Upload server returned non-JSON body") from e
