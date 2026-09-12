@@ -5,19 +5,22 @@ nicotin.client
 The :class:`Client` class: NICOTIN's single entry point, deliberately
 shaped like ``pyrogram.Client`` — same method names, same decorator
 style, same ``run()`` convenience, same "everything is a coroutine"
-philosophy — but talking to Rubika instead of Telegram.
+philosophy — but talking to Rubika's official **Bot API** with a
+**bot token** (the credential you get from ``@rubika_bot``), not a
+user session/auth key.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
+import logging
+import time
 from pathlib import Path
 from typing import Callable
 
 from .network import Session
 from .types import Message, Chat, User, File, CallbackQuery, Update
-from .enums import ChatType, ChatActivity, ParseMode
+from .enums import ParseMode  # noqa: F401 (kept in signatures for future use)
 from .filters import Filter, all as filters_all
 from .handlers import (
     Handler,
@@ -26,17 +29,25 @@ from .handlers import (
     DeletedMessagesHandler,
     CallbackQueryHandler,
 )
-from .errors import AuthError
+from .errors import AuthError, RPCError, FloodWait, ConnectionError_, RequestTimeout
+
+logger = logging.getLogger("nicotin")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[NICOTIN] %(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 
 class Client:
     """
-    NICOTIN's main class — one instance per Rubika account/bot.
+    NICOTIN's main class — one instance per Rubika **bot**.
 
-    :param name: a local session name, used for the ``{name}.session`` file.
-    :param auth: the account's auth key. If omitted, NICOTIN will look
-        for a saved ``{name}.session`` file on disk.
-    :param platform: reported client platform (``"web"``, ``"android"``, ``"rubx"``).
+    :param bot_token: the token Rubika Bot (``@rubika_bot``) gave you when
+        you created your bot. This is the only credential needed — there
+        is no login/OTP step and nothing gets saved to disk.
+    :param base_url: override the Bot API base URL, if you're pointed at
+        a different endpoint than the default.
     :param workers: number of concurrent update-dispatch workers, exactly
         like Pyrogram's own ``workers`` parameter.
 
@@ -44,7 +55,7 @@ class Client:
 
         from nicotin import Client, filters
 
-        app = Client("my_account", auth="...")
+        app = Client(bot_token="123456:AbCdEf...")
 
         @app.on_message(filters.command("start"))
         async def start(client, message):
@@ -55,63 +66,72 @@ class Client:
 
     def __init__(
         self,
-        name: str,
-        auth: str | None = None,
+        bot_token: str,
         *,
-        platform: str = "web",
+        base_url: str | None = None,
         workers: int = 4,
-        session_dir: str = ".",
     ):
-        self.name = name
-        self.workers = workers
-        self.session_dir = Path(session_dir)
-        self._auth = auth or self._load_session()
-        if not self._auth:
+        if not bot_token:
             raise AuthError(
-                f"No auth key provided and no session file found for '{name}'. "
-                f"Pass auth=... on first run."
+                "No bot_token provided. Create a bot with @rubika_bot on "
+                "Rubika and pass the token it gives you as bot_token=...."
             )
 
-        self.session = Session(self._auth, platform=platform)
+        self.bot_token = bot_token
+        self.workers = workers
+        self.session = Session(bot_token, base_url=base_url) if base_url else Session(bot_token)
         self._handlers: list[Handler] = []
         self._polling_task: asyncio.Task | None = None
+        self._next_offset_id: str | None = None
         self.me: User | None = None
-
-    # ------------------------------------------------------------------
-    # Session persistence
-    # ------------------------------------------------------------------
-
-    def _session_path(self) -> Path:
-        return self.session_dir / f"{self.name}.session"
-
-    def _load_session(self) -> str | None:
-        path = self._session_path()
-        return path.read_text().strip() if path.exists() else None
-
-    def _save_session(self):
-        self._session_path().write_text(self._auth)
 
     # ------------------------------------------------------------------
     # Lifecycle — mirrors pyrogram.Client.start / stop / run / idle
     # ------------------------------------------------------------------
 
     async def start(self) -> "Client":
-        """Connect and begin listening for updates. Returns ``self`` for chaining."""
-        self._save_session()
-        self.me = await self.get_me()
+        """
+        Verify the bot token and begin listening for updates. Returns ``self``.
+
+        Logs a clear success/failure message so it's obvious whether the
+        bot actually came online, instead of failing silently.
+        """
+        logger.info("در حال اتصال به Rubika Bot API ...")
+        started_at = time.monotonic()
+        try:
+            self.me = await self.get_me()
+        except AuthError as e:
+            logger.error(f"توکن بات نامعتبر است، اجرا متوقف شد: {e}")
+            raise
+        except RequestTimeout as e:
+            logger.error(f"اتصال به سرور روبیکا تایم‌اوت شد، ربات اجرا نشد: {e}")
+            raise
+        except ConnectionError_ as e:
+            logger.error(f"اتصال به سرور روبیکا برقرار نشد، ربات اجرا نشد: {e}")
+            raise
+        except RPCError as e:
+            logger.error(f"سرور روبیکا خطا برگرداند، ربات اجرا نشد: {e}")
+            raise
+
+        elapsed = time.monotonic() - started_at
+        who = f"@{self.me.username}" if self.me and self.me.username else (self.me.first_name if self.me else "")
+        logger.info(f"ربات {who} با موفقیت متصل شد ✅ ({elapsed:.2f}s) — شروع دریافت پیام‌ها ...")
+
         self._polling_task = asyncio.create_task(self._update_loop())
         return self
 
     async def stop(self):
-        """Disconnect and stop dispatching updates."""
+        """Stop dispatching updates and close the underlying HTTP session."""
+        logger.info("در حال متوقف کردن ربات ...")
         if self._polling_task:
             self._polling_task.cancel()
         await self.session.close()
+        logger.info("ربات متوقف شد.")
 
     def run(self, coroutine=None):
         """
         Blocking helper exactly like ``pyrogram.Client.run()``: starts the
-        client, optionally awaits ``coroutine``, then idles until Ctrl+C.
+        bot, optionally awaits ``coroutine``, then idles until Ctrl+C.
         """
         async def _runner():
             await self.start()
@@ -133,50 +153,65 @@ class Client:
             pass
 
     async def _update_loop(self):
-        """Long-polls for new updates and dispatches them to handlers."""
+        """Long-polls ``getUpdates`` and dispatches new updates to handlers."""
+        consecutive_errors = 0
         while True:
             try:
-                raw_updates = await self.session.invoke("getUpdates", {"limit": 100})
-                for raw in raw_updates.get("updates", []):
+                params = {"limit": 100}
+                if self._next_offset_id:
+                    params["offset_id"] = self._next_offset_id
+
+                result = await self.session.invoke("getUpdates", params)
+                raw_updates = result.get("updates", [])
+                for raw in raw_updates:
                     update = self._parse_update(raw)
                     await self._dispatch(update)
+                if raw_updates:
+                    self._next_offset_id = raw_updates[-1].get("next_offset_id") or result.get("next_offset_id")
+                consecutive_errors = 0
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # A production client would log this; kept silent here
-                # to match a minimal skeleton.
-                pass
+            except RequestTimeout as e:
+                consecutive_errors += 1
+                logger.warning(f"تایم‌اوت هنگام دریافت آپدیت‌ها (تلاش ناموفق #{consecutive_errors}): {e}")
+            except FloodWait as e:
+                logger.warning(f"محدودیت نرخ درخواست از سمت روبیکا — {e.value} ثانیه صبر می‌کنیم ...")
+                await asyncio.sleep(e.value)
+                continue
+            except ConnectionError_ as e:
+                consecutive_errors += 1
+                logger.error(f"قطعی شبکه هنگام دریافت آپدیت‌ها (تلاش ناموفق #{consecutive_errors}): {e}")
+            except RPCError as e:
+                consecutive_errors += 1
+                logger.error(f"خطای API روبیکا هنگام دریافت آپدیت‌ها: {e}")
+            except Exception as e:
+                consecutive_errors += 1
+                logger.exception(f"خطای غیرمنتظره در حلقه‌ی دریافت آپدیت: {e}")
             await asyncio.sleep(1)
 
     def _parse_update(self, raw: dict) -> Update:
         update_type = raw.get("type")
-        chat_id = raw.get("object_guid", "")
+        chat_id = raw.get("chat_id", "")
 
-        if update_type == "NewMessage":
-            return Update(message=Message._parse(self, raw.get("message", {}), chat_id))
-        if update_type == "EditedMessage":
-            return Update(edited_message=Message._parse(self, raw.get("message", {}), chat_id))
+        if update_type in ("NewMessage", "StartedBot"):
+            return Update(message=Message._parse(self, raw.get("new_message", raw.get("message", {})), chat_id))
+        if update_type in ("UpdatedMessage", "EditedMessage"):
+            return Update(edited_message=Message._parse(self, raw.get("updated_message", raw.get("message", {})), chat_id))
         if update_type == "RemovedMessage":
-            return Update(deleted_message_ids=raw.get("message_ids", []))
-        if update_type == "CallbackQuery":
+            return Update(deleted_message_ids=[raw.get("removed_message_id")] if raw.get("removed_message_id") else [])
+        if update_type in ("ButtonClicked", "CallbackQuery"):
             msg = Message._parse(self, raw.get("message", {}), chat_id)
             cq = CallbackQuery(
                 client=self,
-                id=raw.get("callback_id", ""),
-                from_user=User(client=self, id=raw.get("user_guid", ""), first_name=""),
+                id=raw.get("callback_id", raw.get("button_id", "")),
+                from_user=User(client=self, id=raw.get("chat_id", ""), first_name=""),
                 message=msg,
-                data=raw.get("data", ""),
+                data=raw.get("data", raw.get("button_id", "")),
             )
             return Update(callback_query=cq)
         return Update()
 
     async def _dispatch(self, update: Update):
-        target = (
-            update.message
-            or update.edited_message
-            or update.callback_query
-            or update.deleted_message_ids
-        )
         for handler in self._handlers:
             if update.message and isinstance(handler, MessageHandler):
                 event = update.message
@@ -189,13 +224,17 @@ class Client:
             else:
                 continue
 
-            if isinstance(event, Message) or isinstance(event, CallbackQuery):
-                matched = await handler.check(self, getattr(event, "message", event) if isinstance(event, CallbackQuery) else event)
+            if isinstance(event, (Message, CallbackQuery)):
+                check_target = event.message if isinstance(event, CallbackQuery) else event
+                matched = await handler.check(self, check_target)
             else:
                 matched = True
 
             if matched:
-                await handler.callback(self, event)
+                try:
+                    await handler.callback(self, event)
+                except Exception as e:
+                    logger.exception(f"خطا داخل هندلر '{handler.callback.__name__}': {e}")
 
     # ------------------------------------------------------------------
     # Handler registration — decorators mirror pyrogram.Client exactly
@@ -233,13 +272,16 @@ class Client:
         return decorator
 
     # ------------------------------------------------------------------
-    # API methods — names/signatures mirror pyrogram.Client's own
+    # API methods — names/signatures mirror pyrogram.Client's own,
+    # bodies match Rubika's official Bot API vocabulary (chat_id, not
+    # object_guid; no group-admin methods, since a bot token doesn't
+    # carry a user's admin permissions).
     # ------------------------------------------------------------------
 
     async def get_me(self) -> User:
-        """Fetch info about the currently logged-in account."""
-        data = await self.session.invoke("getUserInfo", {})
-        return User._parse(self, data.get("user", {}))
+        """Fetch info about this bot itself."""
+        data = await self.session.invoke("getMe", {})
+        return User._parse(self, data.get("bot", data))
 
     async def send_message(
         self,
@@ -250,118 +292,93 @@ class Client:
         parse_mode: ParseMode = ParseMode.NONE,
     ) -> Message:
         """Send a text message to ``chat_id``."""
-        data = {"object_guid": chat_id, "text": text, "rnd": _rnd()}
+        data = {"chat_id": chat_id, "text": text}
         if reply_to_message_id:
             data["reply_to_message_id"] = reply_to_message_id
         result = await self.session.invoke("sendMessage", data)
         return Message._parse(self, result, chat_id)
 
     async def send_photo(self, chat_id: str, photo: str, *, caption: str | None = None, **kwargs) -> Message:
-        """Send a photo (local path or previously uploaded ``file_id``) to ``chat_id``."""
-        return await self._send_media(chat_id, photo, "Image", caption=caption, **kwargs)
+        """Send a photo (local path) to ``chat_id``."""
+        return await self._send_media(chat_id, photo, "sendFile", caption=caption, **kwargs)
 
     async def send_video(self, chat_id: str, video: str, *, caption: str | None = None, **kwargs) -> Message:
-        return await self._send_media(chat_id, video, "Video", caption=caption, **kwargs)
+        return await self._send_media(chat_id, video, "sendFile", caption=caption, **kwargs)
 
     async def send_voice(self, chat_id: str, voice: str, **kwargs) -> Message:
-        return await self._send_media(chat_id, voice, "Voice", **kwargs)
+        return await self._send_media(chat_id, voice, "sendFile", **kwargs)
 
     async def send_document(self, chat_id: str, document: str, *, caption: str | None = None, **kwargs) -> Message:
-        return await self._send_media(chat_id, document, "File", caption=caption, **kwargs)
+        return await self._send_media(chat_id, document, "sendFile", caption=caption, **kwargs)
 
     async def _send_media(
         self,
         chat_id: str,
         media: str,
-        media_type: str,
+        method: str,
         *,
         caption: str | None = None,
         reply_to_message_id: str | None = None,
     ) -> Message:
-        file_id = await self._upload(media)
-        data = {
-            "object_guid": chat_id,
-            "rnd": _rnd(),
-            "file_inline": {"file_id": file_id, "type": media_type},
-        }
+        file_id = await self._upload(chat_id, media)
+        data = {"chat_id": chat_id, "file_id": file_id}
         if caption:
             data["text"] = caption
         if reply_to_message_id:
             data["reply_to_message_id"] = reply_to_message_id
-        result = await self.session.invoke("sendMessage", data)
+        result = await self.session.invoke(method, data)
         return Message._parse(self, result, chat_id)
 
-    async def _upload(self, path: str) -> str:
-        """Upload a local file to Rubika's storage and return its ``file_id``."""
-        result = await self.session.invoke("requestSendFile", {"file_name": Path(path).name})
-        return result.get("file_id", "")
+    async def _upload(self, chat_id: str, path: str) -> str:
+        """
+        Upload a local file for ``chat_id`` and return its ``file_id``,
+        following the Bot API's two-step ``requestSendFile`` + upload flow.
+        """
+        request = await self.session.invoke(
+            "requestSendFile", {"type": "File", "file_name": Path(path).name}
+        )
+        upload_url = request.get("upload_url", "")
+        uploaded = await self.session.upload_file(upload_url, path)
+        return uploaded.get("file_id", request.get("file_id", ""))
 
     async def download_media(self, file: File, file_path: str | None = None) -> str:
         """Download ``file`` to ``file_path`` (or the file's own name) and return the local path."""
         dest = file_path or (file.name or file.id)
-        result = await self.session.invoke(
-            "requestFile", {"file_id": file.id, "access_hash_rec": file.access_hash_rec}
-        )
+        result = await self.session.invoke("getFile", {"file_id": file.id})
         Path(dest).write_bytes(result.get("bytes", b""))
         return dest
 
     async def edit_message_text(self, chat_id: str, message_id: str, text: str) -> Message:
         result = await self.session.invoke(
-            "editMessage", {"object_guid": chat_id, "message_id": message_id, "text": text}
+            "editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text}
         )
         return Message._parse(self, result, chat_id)
 
-    async def delete_messages(self, chat_id: str, message_ids: list[str], *, revoke: bool = True):
+    async def delete_messages(self, chat_id: str, message_ids: list[str], **_ignored):
+        """Delete one or more messages. (Bots can only delete their own messages.)"""
         return await self.session.invoke(
-            "deleteMessages",
-            {"object_guid": chat_id, "message_ids": message_ids, "type": "Global" if revoke else "Local"},
+            "deleteMessage", {"chat_id": chat_id, "message_id": message_ids[0]}
+        ) if len(message_ids) == 1 else await asyncio.gather(
+            *(self.session.invoke("deleteMessage", {"chat_id": chat_id, "message_id": mid}) for mid in message_ids)
         )
 
     async def forward_messages(self, to_chat_id: str, from_chat_id: str, message_ids: list[str]):
-        return await self.session.invoke(
-            "forwardMessages",
-            {
-                "from_object_guid": from_chat_id,
-                "to_object_guid": to_chat_id,
-                "message_ids": message_ids,
-                "rnd": _rnd(),
-            },
-        )
+        return await asyncio.gather(*(
+            self.session.invoke(
+                "forwardMessage",
+                {"from_chat_id": from_chat_id, "to_chat_id": to_chat_id, "message_id": mid},
+            )
+            for mid in message_ids
+        ))
 
     async def get_chat(self, chat_id: str) -> Chat:
-        """Fetch full info about a chat, group or channel."""
-        data = await self.session.invoke("getObjectInfo", {"object_guid": chat_id})
-        return Chat._parse(self, data)
+        """Fetch info about a chat the bot is a member of."""
+        data = await self.session.invoke("getChat", {"chat_id": chat_id})
+        return Chat._parse(self, data.get("chat", data))
 
     async def get_chat_history(self, chat_id: str, *, limit: int = 50) -> list[Message]:
-        data = await self.session.invoke(
-            "getMessages", {"object_guid": chat_id, "limit": limit}
-        )
+        data = await self.session.invoke("getChatHistory", {"chat_id": chat_id, "limit": limit})
         return [Message._parse(self, m, chat_id) for m in data.get("messages", [])]
-
-    async def ban_chat_member(self, chat_id: str, user_id: str):
-        return await self.session.invoke(
-            "banGroupMember", {"group_guid": chat_id, "member_guid": user_id, "action": "Set"}
-        )
-
-    async def unban_chat_member(self, chat_id: str, user_id: str):
-        return await self.session.invoke(
-            "banGroupMember", {"group_guid": chat_id, "member_guid": user_id, "action": "Unset"}
-        )
-
-    async def leave_chat(self, chat_id: str):
-        return await self.session.invoke("leaveGroup", {"group_guid": chat_id})
-
-    async def pin_chat_message(self, chat_id: str, message_id: str):
-        return await self.session.invoke(
-            "setPinMessage", {"object_guid": chat_id, "message_id": message_id, "action": "Pin"}
-        )
-
-    async def send_chat_action(self, chat_id: str, action: ChatActivity = ChatActivity.TYPING):
-        """Show a typing/recording/uploading indicator, like Pyrogram's ``send_chat_action``."""
-        return await self.session.invoke(
-            "sendChatActivity", {"object_guid": chat_id, "activity": action.value}
-        )
 
     async def answer_callback_query(self, callback_query_id: str, *, text: str | None = None, show_alert: bool = False):
         return await self.session.invoke(
@@ -369,7 +386,8 @@ class Client:
             {"callback_id": callback_query_id, "text": text, "show_alert": show_alert},
         )
 
-
-def _rnd() -> int:
-    import random
-    return random.randint(100000, 999999999)
+    async def set_webhook(self, url: str, update_types: list[str] | None = None):
+        """Register a webhook URL for updates, instead of long-polling ``getUpdates``."""
+        return await self.session.invoke(
+            "updateBotEndpoints", {"url": url, "type": update_types or ["ReceiveUpdate"]}
+        )
