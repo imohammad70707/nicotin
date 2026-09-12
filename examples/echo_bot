@@ -1,0 +1,32 @@
+"""
+A minimal echo bot — notice how close this reads to a Pyrogram example.
+"""
+
+from nicotin import Client, filters
+
+app = Client("echo_bot", auth="YOUR_AUTH_KEY_HERE")
+
+
+@app.on_message(filters.command("start"))
+async def start(client: Client, message):
+    await message.reply(f"سلام {message.from_user.first_name if message.from_user else ''} 👋\nبه نیکوتین خوش اومدی.")
+
+
+@app.on_message(filters.text & ~filters.command(["start", "help"]))
+async def echo(client: Client, message):
+    await message.reply(message.text)
+
+
+@app.on_message(filters.photo)
+async def on_photo(client: Client, message):
+    path = await message.download()
+    await message.reply(f"عکس دریافت شد و در {path} ذخیره شد.")
+
+
+@app.on_callback_query()
+async def on_button(client: Client, callback_query):
+    await callback_query.answer("دکمه دریافت شد ✅")
+
+
+if __name__ == "__main__":
+    app.run()
