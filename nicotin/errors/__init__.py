@@ -28,7 +28,7 @@ class RPCError(NicotinError):
 
 
 class AuthError(NicotinError):
-    """Raised when the session's auth key / sign key is missing or rejected."""
+    """Raised when the bot token is missing, malformed, or rejected by Rubika."""
 
 
 class FloodWait(NicotinError):
@@ -45,6 +45,10 @@ class FloodWait(NicotinError):
 
 class ConnectionError_(NicotinError):
     """Raised when NICOTIN cannot reach any Rubika API endpoint."""
+
+
+class RequestTimeout(NicotinError):
+    """Raised when a request to Rubika's API takes too long and times out."""
 
 
 class BadRequest(RPCError):
@@ -65,6 +69,7 @@ __all__ = [
     "AuthError",
     "FloodWait",
     "ConnectionError_",
+    "RequestTimeout",
     "BadRequest",
     "Unauthorized",
     "NotFound",
