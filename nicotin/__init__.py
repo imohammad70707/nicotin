@@ -10,7 +10,7 @@ feels at home immediately.
 
     from nicotin import Client, filters
 
-    app = Client("my_account", auth="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+    app = Client(bot_token="123456:AbCdEfGhIjKlMnOpQrStUvWxYz")
 
     @app.on_message(filters.text & filters.private)
     async def echo(client, message):
