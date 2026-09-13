@@ -47,6 +47,10 @@ class ConnectionError_(NicotinError):
     """Raised when NICOTIN cannot reach any Rubika API endpoint."""
 
 
+class RequestTimeout(NicotinError):
+    """Raised when a request to the Rubika API times out."""
+
+
 class BadRequest(RPCError):
     """The request was malformed or missing required fields."""
 
@@ -65,6 +69,7 @@ __all__ = [
     "AuthError",
     "FloodWait",
     "ConnectionError_",
+    "RequestTimeout",
     "BadRequest",
     "Unauthorized",
     "NotFound",
